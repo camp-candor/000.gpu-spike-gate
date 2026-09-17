@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
+    "build": "npm run typecheck",
     "benchmark": "tsx harness.ts",
     "typecheck": "tsc --noEmit",
     "upload:checkpoint": "tsx scripts/upload_checkpoint.ts",
