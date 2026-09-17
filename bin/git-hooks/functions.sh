@@ -53,26 +53,57 @@ run_package_binary() {
 }
 
 run_snail_sh() {
-    run_package_binary snail-sh "$@"
+    cmd="${1:-}"
+    shift || true
+    case "$cmd" in
+        spacer)
+            printf '\n'
+            ;;
+        kabob)
+            text="${1:-}"
+            printf '\033[1;35m==> %s\033[0m\n' "$text"
+            ;;
+        status_pair)
+            k="${1:-}"
+            v="${2:-}"
+            printf '  \033[1m%s:\033[0m %s\n' "$k" "$v"
+            ;;
+        critical|error)
+            printf '\033[1;31m[ERROR] %s\033[0m\n' "$*" >&2
+            ;;
+        success)
+            printf '\033[1;32m[SUCCESS] %s\033[0m\n' "$*"
+            ;;
+        *)
+            printf '%s\n' "$*"
+            ;;
+    esac
 }
 
 show_hook_section() {
     hook_name="$1"
     run_snail_sh spacer 1
-    run_snail_sh kabob "🐌 Running: $hook_name ..." '90%' magenta true
+    run_snail_sh kabob "Running: $hook_name ..."
     run_snail_sh spacer 1
 }
 
 show_completed_commit() {
     commit_message="$(git log -1 --format=%s)"
     run_snail_sh spacer 1
-    run_snail_sh status_pair 'Commit message' "$commit_message" success
+    run_snail_sh status_pair 'Commit message' "$commit_message"
     run_snail_sh success 'Commit completed successfully.'
     run_snail_sh spacer 1
 }
 
 run_scope_commit() {
-    run_package_binary scope-commit --checked-commit "$@" || return $?
+    commit_type="${1:-}"
+    shift || true
+    msg="$*"
+    if [ -n "$commit_type" ] && [ -n "$msg" ]; then
+        git commit -m "$commit_type: $msg"
+    else
+        git commit "$@"
+    fi
     show_completed_commit
 }
 

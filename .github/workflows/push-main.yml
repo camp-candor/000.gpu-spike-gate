@@ -1,58 +1,33 @@
 # ─────────────────────────────────────────────────────────────
-# WORKFLOW: Push Main (basic, standalone)
+# WORKFLOW: Main CI
 #
-# A minimal self-contained release flow for this npm consumer repo. It mirrors
-# the snailicid3 monorepo's changeset "version PR" process but inlines a basic
-# version instead of calling gbtunney/snailicid3-actions/.github/workflows/
-# call-release-plan.yml.
-#
-# Runs on every push to `main` and picks ONE of two paths:
-#
-#   1. Pending changesets exist (.changeset/*.md, excluding README.md)
-#        → run `changeset version`, commit with a scope-commit-derived
-#          `release(<scope>): ...` message, push a `release/<slug>` branch, and
-#          open/update a version PR whose title carries the type + scope.
-#
-#   2. No pending changesets (a version PR was merged)
-#        → cut a GitHub Release with a `v<version>` tag for the current
-#          package.json version, if that tag does not already exist.
-#
-# Note: this package is private, so nothing is published to npm — the "publish"
-# step is just the tagged GitHub Release.
-#
-# Opening a PR / triggering downstream workflows: GITHUB_TOKEN-authored pushes
-# do not start other workflows. Set a `GH_PAT` secret (repo + workflow scope)
-# to have the version PR trigger PR Checks automatically; otherwise it falls
-# back to the default token.
+# Runs on every push into `main` and verifies the build and tests.
 # ─────────────────────────────────────────────────────────────
-name: Push Main
+name: Main CI
 
 on:
     push:
         branches:
             - main
+    workflow_dispatch:
 
 concurrency:
     group: push-main-${{ github.ref }}
     cancel-in-progress: false
 
 permissions:
-    contents: write
-    pull-requests: write
+    contents: read
 
 env:
     HUSKY: 0
 
 jobs:
-    release:
-        name: changeset version & release
+    ci:
+        name: build & test
         runs-on: ubuntu-latest
         steps:
             - name: Checkout
               uses: actions/checkout@v4
-              with:
-                  fetch-depth: 0
-                  token: ${{ secrets.GH_PAT || github.token }}
 
             - name: Setup Node
               uses: actions/setup-node@v4
@@ -63,154 +38,8 @@ jobs:
             - name: Install dependencies
               run: npm ci
 
-            - name: Detect pending changesets
-              id: detect
-              shell: bash
-              run: |
-                  set -euo pipefail
+            - name: Build
+              run: npm run build
 
-                  count=0
-                  primary=""
-
-                  # A freshly bootstrapped repo may not have a .changeset dir yet;
-                  # treat that as zero pending changesets rather than crashing.
-                  if [ -d .changeset ]; then
-                    count="$(find .changeset -maxdepth 1 -type f -name '*.md' ! -name 'README.md' | wc -l | tr -d ' ')"
-                    primary="$(find .changeset -maxdepth 1 -type f -name '*.md' ! -name 'README.md' -printf '%f\n' \
-                      | sed 's/\.md$//' | LC_ALL=C sort | head -n1)"
-                  fi
-
-                  has_changesets=false
-                  [ "$count" -gt 0 ] && has_changesets=true
-
-                  echo "count=$count" >> "$GITHUB_OUTPUT"
-                  echo "primary=$primary" >> "$GITHUB_OUTPUT"
-                  echo "has_changesets=$has_changesets" >> "$GITHUB_OUTPUT"
-                  echo "Pending changesets: $count (has_changesets=$has_changesets)"
-
-            # ── Path 1: pending changesets → create/update version PR ──────────
-            - name: Derive release branch
-              if: steps.detect.outputs.has_changesets == 'true'
-              id: branch
-              shell: bash
-              run: |
-                  set -euo pipefail
-
-                  count="${{ steps.detect.outputs.count }}"
-                  primary="${{ steps.detect.outputs.primary }}"
-
-                  if [ "$count" -eq 1 ]; then
-                    slug="$primary"
-                  else
-                    slug="${primary}-plus-$((count - 1))-more"
-                  fi
-
-                  slug="$(printf '%s' "$slug" | tr '[:upper:]' '[:lower:]' \
-                    | sed -E 's/[^a-z0-9._-]+/-/g; s/^-+//; s/-+$//; s/-{2,}/-/g')"
-                  [ -n "$slug" ] || slug="changeset-$(git rev-parse --short HEAD)"
-
-                  echo "branch=release/$slug" >> "$GITHUB_OUTPUT"
-                  echo "Release branch: release/$slug"
-
-            # NOTE: this deletes the .changeset/*.md files. The branch slug is
-            # already captured above (steps.detect.outputs.primary + the Derive
-            # step), so it must stay AFTER "Derive release branch".
-            - name: Version packages
-              if: steps.detect.outputs.has_changesets == 'true'
-              run: npm run changeset:version
-
-            - name: Compute scoped release title
-              if: steps.detect.outputs.has_changesets == 'true'
-              id: msg
-              shell: bash
-              run: |
-                  set -euo pipefail
-
-                  git add -A
-                  if git diff --cached --quiet; then
-                    echo "::error::changeset version produced no staged changes."
-                    exit 1
-                  fi
-
-                  # Derive the `release(<scope>): ...` title exactly the way the
-                  # local commit scripts do — scope is computed from staged files.
-                  if msg="$(npm exec -- scope-commit --staged --message release 'version packages')" && [ -n "$msg" ]; then
-                    :
-                  else
-                    msg="release(root): version packages"
-                    echo "::warning::scope-commit failed to derive a scoped message; falling back to: $msg"
-                  fi
-
-                  echo "message=$msg" >> "$GITHUB_OUTPUT"
-                  echo "Release title: $msg"
-
-            - name: Commit and push release branch
-              if: steps.detect.outputs.has_changesets == 'true'
-              shell: bash
-              run: |
-                  set -euo pipefail
-
-                  git config user.name "github-actions[bot]"
-                  git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-                  git config commit.gpgsign false
-
-                  git commit -m "${{ steps.msg.outputs.message }}" \
-                    -m "Source ref: ${{ github.sha }}" \
-                    -m "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-
-                  git push origin "HEAD:refs/heads/${{ steps.branch.outputs.branch }}" --force
-
-            - name: Create or update version PR
-              if: steps.detect.outputs.has_changesets == 'true'
-              shell: bash
-              env:
-                  GH_TOKEN: ${{ secrets.GH_PAT || github.token }}
-              run: |
-                  set -euo pipefail
-
-                  # Defend against a token pasted with trailing whitespace, which
-                  # makes gh fail with an invalid Authorization header.
-                  GH_TOKEN="${GH_TOKEN//[$' \t\r\n']/}"
-                  export GH_TOKEN
-
-                  title="${{ steps.msg.outputs.message }}"
-                  body="Automated version bump from Changesets. Merge this PR to tag and release."
-                  branch="${{ steps.branch.outputs.branch }}"
-
-                  pr="$(gh pr list --head "$branch" --base main --state open --json number -q '.[0].number' 2>/dev/null || true)"
-                  if [ -z "$pr" ]; then
-                    gh pr create --head "$branch" --base main --title "$title" --body "$body"
-                  else
-                    gh pr edit "$pr" --title "$title" --body "$body"
-                  fi
-
-            # ── Path 2: no changesets → tag + GitHub Release ───────────────────
-            - name: Release current version
-              if: steps.detect.outputs.has_changesets == 'false'
-              shell: bash
-              env:
-                  GH_TOKEN: ${{ github.token }}
-              run: |
-                  set -euo pipefail
-
-                  version="$(node -p "require('./package.json').version")"
-                  tag="v$version"
-
-                  if [ "$version" = "0.0.0" ]; then
-                    echo "Version is the 0.0.0 placeholder; nothing to release."
-                    exit 0
-                  fi
-
-                  if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
-                    echo "Tag $tag already exists on origin; nothing to release."
-                    exit 0
-                  fi
-
-                  echo "Creating GitHub Release $tag."
-                  gh release create "$tag" --title "$tag" --generate-notes --target "${{ github.sha }}"
-
-                  {
-                    echo "## 🚀 Release published"
-                    echo ""
-                    echo "- tag: \`$tag\`"
-                  } >> "$GITHUB_STEP_SUMMARY"
+            - name: Test
+              run: npm run test --if-present

@@ -1,0 +1,10 @@
+export default {
+    globs: ['**/*.md'],
+    ignores: ['node_modules', 'dist', 'scratch', 'data/**'],
+    config: {
+        MD013: false,
+        MD028: false,
+        MD033: false,
+        MD041: false,
+    },
+}

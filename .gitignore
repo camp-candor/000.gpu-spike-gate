@@ -148,8 +148,11 @@ dist
 *.cjs
 *.d.cts
 *.cjs.map
-*.d.cts.map
 *.map
+
+# Allow root configuration files
+!*.config.mjs
+!.*.mjs
 
 # Docs
 docs
