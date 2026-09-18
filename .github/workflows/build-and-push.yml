@@ -27,3 +27,21 @@ jobs:
           context: .
           push: true
           tags: ghcr.io/${{ github.repository_owner }}/gpu-spike-gate-00:v1
+
+      - name: Ensure Package Visibility is Public
+        env:
+          # Use GHCR_PAT if stored in repo secrets, fallback to GITHUB_TOKEN
+          GH_TOKEN: ${{ secrets.GHCR_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Setting package visibility to public..."
+          gh api \
+            --method PATCH \
+            -H "Accept: application/vnd.github+json" \
+            /orgs/${{ github.repository_owner }}/packages/container/gpu-spike-gate-00/visibility \
+            -f visibility=public || echo "Failed via org endpoint, attempting user endpoint..."
+
+          gh api \
+            --method PATCH \
+            -H "Accept: application/vnd.github+json" \
+            /user/packages/container/gpu-spike-gate-00/visibility \
+            -f visibility=public || true

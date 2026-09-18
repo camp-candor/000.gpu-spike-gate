@@ -1,123 +1,132 @@
-import { spawn } from 'node:child_process';
-import fs from 'node:fs';
-import path from 'node:path';
-import dotenv from 'dotenv';
-import { evaluateGate0, type BenchmarkRun } from './benchmarks/gate0Arbitrator.js';
+import "dotenv/config";
+import {
+  evaluateGate0,
+  type BenchmarkRun,
+} from "./benchmarks/gate0Arbitrator.js";
 
-dotenv.config();
+const RUNPOD_API_KEY = process.env.RUNPOD_API_KEY || "";
+const RUNPOD_ENDPOINT_ID = process.env.RUNPOD_ENDPOINT_ID || "hdf8left0vdukl";
+const HOURLY_RATE = parseFloat(process.env.RUNPOD_HOURLY_RATE || "0.74");
 
 function log(phase: string, msg: string) {
   const ts = new Date().toISOString().substring(11, 19);
   console.log(`[${ts}] [${phase}] ${msg}`);
 }
 
-const R2_ENDPOINT_URL = process.env.R2_ENDPOINT_URL || '';
-const R2_BUCKET = process.env.R2_BUCKET || 'production-checkpoints-us-east';
-const AWS_ACCESS_KEY_ID = process.env.AWS_ACCESS_KEY_ID || '';
-const AWS_SECRET_ACCESS_KEY = process.env.AWS_SECRET_ACCESS_KEY || '';
-const CHECKPOINT_KEY = process.env.CHECKPOINT_KEY || 'checkpoints/wan2.2_i2v_high_noise_14B_Q3_K_S.gguf';
-const HOURLY_RATE = parseFloat(process.env.RUNPOD_HOURLY_RATE || '0.74');
-
-function execWithOutput(cmd: string, args: string[], envOverrides: Record<string, string> = {}): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const proc = spawn(cmd, args, { env: { ...process.env, ...envOverrides }, shell: true });
-
-    let output = '';
-    proc.stdout.on('data', (d) => {
-      const txt = d.toString();
-      output += txt;
-      process.stdout.write(txt);
-    });
-
-    proc.stderr.on('data', (d) => {
-      const txt = d.toString();
-      output += txt;
-      process.stderr.write(txt);
-    });
-
-    proc.on('close', (code) => {
-      if (code === 0) resolve(output);
-      else reject(new Error(`Command ${cmd} exited with code ${code}`));
-    });
-
-    proc.on('error', reject);
-  });
+async function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function runBenchmark(): Promise<void> {
-  console.log('='.repeat(70));
-  log('HARNESS', '=== GATE 0 COLD START SPIKE HARNESS EXECUTION ===');
-  log('PARAMS', `Target R2 Checkpoint: s3://${R2_BUCKET}/${CHECKPOINT_KEY}`);
-  log('COST-MODEL', `Assumed Rate: $${HOURLY_RATE.toFixed(2)}/hour ($${(HOURLY_RATE / 3600).toFixed(6)}/sec)`);
-  console.log('='.repeat(70));
+  console.log("=".repeat(70));
+  log("HARNESS", "=== GATE 0 COLD START SPIKE HARNESS (REMOTE RUNPOD) ===");
+  log(
+    "PARAMS",
+    `Target Endpoint: https://api.runpod.ai/v2/${RUNPOD_ENDPOINT_ID}`,
+  );
+  console.log("=".repeat(70));
 
-  fs.mkdirSync('/tmp/models', { recursive: true });
-  fs.mkdirSync('/tmp/outputs', { recursive: true });
-
-  const s5cmdEnv = {
-    S3_ENDPOINT_URL: R2_ENDPOINT_URL,
-    AWS_ACCESS_KEY_ID: AWS_ACCESS_KEY_ID,
-    AWS_SECRET_ACCESS_KEY: AWS_SECRET_ACCESS_KEY,
-  };
-
-  // Phase A: Ingress via s5cmd
-  log('PHASE-A', `Starting wire-speed s5cmd ingress to /tmp/models/...`);
-  const tStartA = Date.now();
-  await execWithOutput('s5cmd', [
-    '--endpoint-url', R2_ENDPOINT_URL,
-    '--numworkers', '64',
-    'cp', `s3://${R2_BUCKET}/${CHECKPOINT_KEY}`,
-    '/tmp/models/'
-  ], s5cmdEnv);
-  const ingressSeconds = (Date.now() - tStartA) / 1000;
-  log('PHASE-A', `✓ Phase A Network Ingress completed in ${ingressSeconds.toFixed(2)}s`);
-
-  // Phase B & C: Hydration & Compute via headless_runner.py
-  log('PHASE-B-C', 'Spawning Python headless tensor execution...');
-  const pythonOutput = await execWithOutput('python3', ['headless_runner.py']);
-
-  let hydrationSeconds = 0;
-  let computeSeconds = 0;
-  const match = pythonOutput.match(/METRICS:hydration_s=([\d\.]+)\|compute_s=([\d\.]+)/);
-  if (match) {
-    hydrationSeconds = parseFloat(match[1]);
-    computeSeconds = parseFloat(match[2]);
-  } else {
-    throw new Error('Failed to parse METRICS from headless_runner.py output');
+  if (!RUNPOD_API_KEY) {
+    throw new Error("RUNPOD_API_KEY is not set in .env");
   }
 
-  // Phase D: Egress
-  log('PHASE-D', 'Uploading output plate to Cloudflare R2 /outputs/...');
-  const tStartD = Date.now();
-  await execWithOutput('s5cmd', [
-    '--endpoint-url', R2_ENDPOINT_URL,
-    'cp', '/tmp/outputs/render_plate.mp4',
-    `s3://${R2_BUCKET}/outputs/gate0_test_plate.mp4`
-  ], s5cmdEnv);
-  const egressSeconds = (Date.now() - tStartD) / 1000;
-  log('PHASE-D', `✓ Phase D Egress completed in ${egressSeconds.toFixed(2)}s`);
+  log("DISPATCH", "Submitting cold start job (async mode)...");
+  const tStart = Date.now();
 
-  // Calculate economics
-  const totalDuration = ingressSeconds + hydrationSeconds + computeSeconds + egressSeconds;
-  const perSecondRate = HOURLY_RATE / 3600;
-  const cost = totalDuration * perSecondRate;
+  // 1. Submit async job
+  const initRes = await fetch(
+    `https://api.runpod.ai/v2/${RUNPOD_ENDPOINT_ID}/run`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${RUNPOD_API_KEY}`,
+      },
+      body: JSON.stringify({
+        input: {
+          checkpoint_key:
+            process.env.CHECKPOINT_KEY ||
+            "checkpoints/wan2.2_i2v_high_noise_14B_Q3_K_S.gguf",
+        },
+      }),
+    },
+  );
+
+  if (!initRes.ok) {
+    const errorText = await initRes.text();
+    throw new Error(
+      `RunPod submission error (${initRes.status}): ${errorText}`,
+    );
+  }
+
+  const { id: jobId } = await initRes.json();
+  log("DISPATCH", `Job dispatched successfully. Job ID: ${jobId}`);
+
+  // 2. Poll status until complete
+  let result: any = null;
+  while (true) {
+    await sleep(3000);
+    const statusRes = await fetch(
+      `https://api.runpod.ai/v2/${RUNPOD_ENDPOINT_ID}/status/${jobId}`,
+      {
+        headers: { Authorization: `Bearer ${RUNPOD_API_KEY}` },
+      },
+    );
+    result = await statusRes.json();
+    log(
+      "POLL",
+      `Job status: ${result.status} (${((Date.now() - tStart) / 1000).toFixed(1)}s elapsed)`,
+    );
+
+    if (result.status === "COMPLETED" || result.status === "FAILED") {
+      break;
+    }
+  }
+
+  const wallClockSeconds = (Date.now() - tStart) / 1000;
+
+  if (result.status === "FAILED") {
+    throw new Error(
+      `RunPod execution failed: ${JSON.stringify(result.error || result)}`,
+    );
+  }
+
+  log(
+    "RESPONSE",
+    `Worker finished with COMPLETED status in ${wallClockSeconds.toFixed(2)}s wall-clock time.`,
+  );
+  console.log("[RAW PAYLOAD]", JSON.stringify(result, null, 2));
+
+  // 3. Extract metrics from headless_runner / handler
+  const output = result.output || {};
+  const ingressSeconds =
+    output.ingress_seconds ?? output.network_ingress_seconds ?? 0;
+  const hydrationSeconds =
+    output.hydration_seconds ?? output.vram_hydration_seconds ?? 0;
+  const computeSeconds =
+    output.compute_seconds ?? output.inference_seconds ?? 0;
+  const egressSeconds = output.egress_seconds ?? 0;
+  const totalSeconds =
+    ingressSeconds + hydrationSeconds + computeSeconds + egressSeconds ||
+    wallClockSeconds;
+  const cost = totalSeconds * (HOURLY_RATE / 3600);
 
   const runTelemetry: BenchmarkRun = {
-    runId: `run_${Date.now()}`,
+    runId: result.id,
     timestamp: new Date().toISOString(),
     ingressSeconds,
     hydrationSeconds,
     computeSeconds,
     egressSeconds,
-    totalSeconds: totalDuration,
+    totalSeconds,
     costUsd: cost,
-    passedOomCheck: true,
+    passedOomCheck: output.status !== "OOM" && result.status === "COMPLETED",
   };
 
   evaluateGate0(runTelemetry);
 }
 
 runBenchmark().catch((err) => {
-  log('FATAL', `Harness crashed: ${err.message}`);
+  log("FATAL", `Harness crashed: ${err.message}`);
   process.exit(1);
 });
